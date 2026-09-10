@@ -5,21 +5,9 @@ import subprocess
 from pathlib import Path
 
 import streamlit as st
-from dotenv import load_dotenv
 from openai import OpenAI
 
-
-# ==================================================
-# Configuration
-# ==================================================
-
-load_dotenv()
-
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
-
-if not OPENAI_API_KEY:
-    st.error("La clé OPENAI_API_KEY est absente.")
-    st.stop()
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
