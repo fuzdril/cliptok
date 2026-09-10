@@ -76,11 +76,15 @@ def telecharger_vod(url: str) -> Path:
 
     fichiers = [
         fichier for fichier in VOD_DIR.iterdir()
-        if fichier.suffix.lower() in [".mp4", ".mkv", ".webm", ".mov"]
+        if fichier.suffix.lower() in [
+            ".mp4", ".mkv", ".webm", ".mov"
+        ]
     ]
 
     if not fichiers:
-        raise FileNotFoundError("La VOD n'a pas été téléchargée.")
+        raise FileNotFoundError(
+            "La VOD n'a pas été téléchargée."
+        )
 
     return fichiers[0]
 
@@ -106,7 +110,9 @@ def extraire_audio(video_path: Path) -> Path:
     lancer_commande(commande)
 
     if not audio_path.exists():
-        raise FileNotFoundError("Impossible d'extraire l'audio.")
+        raise FileNotFoundError(
+            "Impossible d'extraire l'audio."
+        )
 
     return audio_path
 
@@ -117,10 +123,6 @@ def extraire_audio(video_path: Path) -> Path:
 
 @st.cache_resource
 def charger_modele():
-    """
-    Le modèle small est plus précis mais demande plus de ressources.
-    Pour un serveur peu puissant, utilise "base" ou "tiny".
-    """
     return WhisperModel(
         "small",
         device="cpu",
@@ -195,11 +197,9 @@ def calculer_score(texte: str) -> int:
     for mot, valeur in MOTS_IMPORTANTS.items():
         score += texte_minuscule.count(mot) * valeur
 
-    # Les phrases avec beaucoup de ponctuation sont souvent plus expressives
     score += texte.count("!") * 2
     score += texte.count("?")
 
-    # Une phrase longue contient souvent davantage de contexte
     if len(texte.split()) >= 12:
         score += 1
 
@@ -213,7 +213,7 @@ def detecter_meilleurs_moments(
 ):
     candidats = []
 
-    for index, segment in enumerate(transcription):
+    for segment in transcription:
         score = calculer_score(segment["texte"])
 
         if score <= 0:
@@ -222,7 +222,6 @@ def detecter_meilleurs_moments(
         debut = max(0, segment["debut"] - 12)
         fin = segment["fin"] + 20
 
-        # On garantit une durée minimum
         if fin - debut < duree_clip:
             fin = debut + duree_clip
 
@@ -239,7 +238,10 @@ def detecter_meilleurs_moments(
             "titre": " ".join(texte_autour)[:100]
         })
 
-    candidats.sort(key=lambda element: element["score"], reverse=True)
+    candidats.sort(
+        key=lambda element: element["score"],
+        reverse=True
+    )
 
     moments = []
 
@@ -247,8 +249,14 @@ def detecter_meilleurs_moments(
         chevauchement = False
 
         for moment in moments:
-            debut_max = max(candidat["debut"], moment["debut"])
-            fin_min = min(candidat["fin"], moment["fin"])
+            debut_max = max(
+                candidat["debut"],
+                moment["debut"]
+            )
+            fin_min = min(
+                candidat["fin"],
+                moment["fin"]
+            )
 
             if fin_min > debut_max:
                 chevauchement = True
@@ -271,7 +279,9 @@ def convertir_temps_srt(secondes: float) -> str:
     heures = int(secondes // 3600)
     minutes = int((secondes % 3600) // 60)
     secondes_entieres = int(secondes % 60)
-    millisecondes = int((secondes - int(secondes)) * 1000)
+    millisecondes = int(
+        (secondes - int(secondes)) * 1000
+    )
 
     return (
         f"{heures:02d}:{minutes:02d}:"
@@ -287,8 +297,15 @@ def creer_srt(transcription, debut, fin, chemin_srt):
         if segment["fin"] < debut or segment["debut"] > fin:
             continue
 
-        debut_local = max(0, segment["debut"] - debut)
-        fin_local = min(fin - debut, segment["fin"] - debut)
+        debut_local = max(
+            0,
+            segment["debut"] - debut
+        )
+
+        fin_local = min(
+            fin - debut,
+            segment["fin"] - debut
+        )
 
         lignes.append(str(numero))
         lignes.append(
@@ -300,11 +317,14 @@ def creer_srt(transcription, debut, fin, chemin_srt):
 
         numero += 1
 
-    chemin_srt.write_text("\n".join(lignes), encoding="utf-8")
+    chemin_srt.write_text(
+        "\n".join(lignes),
+        encoding="utf-8"
+    )
 
 
 # =====================================================
-# CRÉATION D'UN EXTRAIT TIKTOK
+# CRÉATION D'UN CLIP TIKTOK
 # =====================================================
 
 def creer_clip_vertical(
@@ -328,10 +348,9 @@ def creer_clip_vertical(
         chemin_srt
     )
 
-    # Format vertical 1080x1920.
-    # Les sous-titres sont incrustés dans la vidéo.
     filtre = (
-        "scale=1080:1920:force_original_aspect_ratio=increase,"
+        "scale=1080:1920:"
+        "force_original_aspect_ratio=increase,"
         "crop=1080:1920,"
         "subtitles=" + str(chemin_srt).replace("\\", "/")
     )
@@ -420,25 +439,78 @@ if st.button(
         vider_dossier(AUDIO_DIR)
         vider_dossier(CLIPS_DIR)
 
+        # Barre et texte de progression
+        barre_progression = st.progress(
+            0,
+            text="Progression : 0%"
+        )
+
+        texte_progression = st.empty()
+
         with st.status(
             "Traitement de la VOD en cours...",
             expanded=True
         ) as statut:
 
+            # Étape 1
+            pourcentage = 5
+            texte_progression.write(
+                f"⏳ Progression : {pourcentage}% — "
+                "Préparation..."
+            )
+            barre_progression.progress(
+                pourcentage,
+                text=f"Progression : {pourcentage}%"
+            )
+
+            # Étape 2
             st.write("⬇️ Téléchargement de la VOD...")
             video_path = telecharger_vod(url_vod)
 
+            pourcentage = 20
+            texte_progression.write(
+                f"⏳ Progression : {pourcentage}% — "
+                "VOD téléchargée"
+            )
+            barre_progression.progress(
+                pourcentage,
+                text=f"Progression : {pourcentage}%"
+            )
+
+            # Étape 3
             st.write("🎧 Extraction de l'audio...")
             audio_path = extraire_audio(video_path)
 
+            pourcentage = 35
+            texte_progression.write(
+                f"⏳ Progression : {pourcentage}% — "
+                "Audio extrait"
+            )
+            barre_progression.progress(
+                pourcentage,
+                text=f"Progression : {pourcentage}%"
+            )
+
+            # Étape 4
             st.write("📝 Transcription avec Whisper...")
             transcription = transcrire_audio(audio_path)
+
+            pourcentage = 60
+            texte_progression.write(
+                f"⏳ Progression : {pourcentage}% — "
+                "Transcription terminée"
+            )
+            barre_progression.progress(
+                pourcentage,
+                text=f"Progression : {pourcentage}%"
+            )
 
             if not transcription:
                 raise RuntimeError(
                     "Aucune parole n'a été détectée dans la VOD."
                 )
 
+            # Étape 5
             st.write("🔎 Recherche des meilleurs moments...")
             moments = detecter_meilleurs_moments(
                 transcription,
@@ -446,14 +518,26 @@ if st.button(
                 nombre_clips=nombre_clips
             )
 
+            pourcentage = 65
+            texte_progression.write(
+                f"⏳ Progression : {pourcentage}% — "
+                "Moments détectés"
+            )
+            barre_progression.progress(
+                pourcentage,
+                text=f"Progression : {pourcentage}%"
+            )
+
             if not moments:
                 raise RuntimeError(
                     "Aucun moment intéressant n'a été détecté."
                 )
 
+            # Étape 6
             st.write("✂️ Création des clips verticaux...")
 
             clips = []
+            total_clips = len(moments)
 
             for numero, moment in enumerate(moments, start=1):
                 clip = creer_clip_vertical(
@@ -468,12 +552,38 @@ if st.button(
                     "moment": moment
                 })
 
+                pourcentage = 65 + int(
+                    (numero / total_clips) * 30
+                )
+
+                texte_progression.write(
+                    f"⏳ Progression : {pourcentage}% — "
+                    f"Clip {numero}/{total_clips} créé"
+                )
+
+                barre_progression.progress(
+                    pourcentage,
+                    text=f"Progression : {pourcentage}%"
+                )
+
+            # Fin
+            barre_progression.progress(
+                100,
+                text="Progression : 100% — Terminé !"
+            )
+
+            texte_progression.success(
+                "✅ Traitement terminé à 100%."
+            )
+
             statut.update(
                 label="✅ Analyse terminée !",
                 state="complete"
             )
 
-        st.success(f"{len(clips)} extrait(s) créé(s).")
+        st.success(
+            f"{len(clips)} extrait(s) créé(s)."
+        )
 
         for element in clips:
             clip = element["fichier"]
@@ -505,4 +615,4 @@ if st.button(
                 )
 
     except Exception as erreur:
-        st.error(f"Erreur : {erreur}")
+        st.error(f"❌ Erreur : {erreur}")
