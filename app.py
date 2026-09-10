@@ -123,12 +123,14 @@ def extraire_audio(video_path: Path) -> Path:
 
 @st.cache_resource
 def charger_modele():
+    token = st.secrets.get("HF_TOKEN", None)
+
     return WhisperModel(
         "small",
         device="cpu",
-        compute_type="int8"
+        compute_type="int8",
+        token=token
     )
-
 def transcrire_audio(audio_path: Path):
     modele = charger_modele()
 
