@@ -1,32 +1,27 @@
-import json
+import os
 import re
+import json
 import subprocess
 from pathlib import Path
 
 import streamlit as st
+from dotenv import load_dotenv
 from openai import OpenAI
 
 
-# =========================
+# ==================================================
 # Configuration
-# =========================
+# ==================================================
 
-st.set_page_config(
-    page_title="ClipTok",
-    page_icon="🎬",
-    layout="centered"
-)
+load_dotenv()
 
-try:
-    API_KEY = st.secrets["OPENAI_API_KEY"]
-except Exception:
-    API_KEY = ""
+OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 
-if not API_KEY:
+if not OPENAI_API_KEY:
     st.error("La clé OPENAI_API_KEY est absente.")
     st.stop()
 
-client = OpenAI(api_key=API_KEY)
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 BASE_DIR = Path("workspace")
 UPLOAD_DIR = BASE_DIR / "uploads"
@@ -36,19 +31,131 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# =========================
-# Fonctions vidéo
-# =========================
+# ==================================================
+# Style mobile
+# ==================================================
+
+st.set_page_config(
+    page_title="ClipTok",
+    page_icon="🎬",
+    layout="centered",
+    initial_sidebar_state="collapsed"
+)
+
+st.markdown(
+    """
+    <style>
+        #MainMenu {
+            visibility: hidden;
+        }
+
+        footer {
+            visibility: hidden;
+        }
+
+        header {
+            visibility: hidden;
+        }
+
+        .block-container {
+            padding: 1rem 0.8rem 3rem 0.8rem;
+            max-width: 720px;
+        }
+
+        h1 {
+            font-size: 1.8rem !important;
+            text-align: center;
+            margin-bottom: 0.3rem;
+        }
+
+        h2, h3 {
+            font-size: 1.25rem !important;
+        }
+
+        p, label, div {
+            font-size: 1rem;
+        }
+
+        button {
+            min-height: 3.2rem !important;
+            border-radius: 14px !important;
+            font-weight: 700 !important;
+        }
+
+        [data-testid="stFileUploader"] {
+            border: 2px dashed #ff2d55;
+            border-radius: 16px;
+            padding: 0.8rem;
+        }
+
+        [data-testid="stDownloadButton"] button {
+            background-color: #111111 !important;
+            color: white !important;
+            width: 100%;
+        }
+
+        video {
+            width: 100%;
+            max-height: 550px;
+            border-radius: 16px;
+        }
+
+        .app-subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 1.2rem;
+        }
+
+        .clip-card {
+            padding: 1rem;
+            border-radius: 18px;
+            background: #f7f7f7;
+            margin: 1rem 0;
+        }
+
+        .badge {
+            background: #ff2d55;
+            color: white;
+            padding: 0.25rem 0.6rem;
+            border-radius: 999px;
+            font-weight: bold;
+            font-size: 0.8rem;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            .clip-card {
+                background: #202020;
+            }
+        }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+
+# ==================================================
+# Fonctions
+# ==================================================
+
+def nettoyer_nom(texte):
+    texte = texte.lower()
+    texte = re.sub(r"[^a-zA-Z0-9À-ÿ_-]+", "_", texte)
+    return texte[:70]
+
 
 def extraire_audio(video_path, audio_path):
     commande = [
         "ffmpeg",
         "-y",
-        "-i", str(video_path),
+        "-i",
+        str(video_path),
         "-vn",
-        "-acodec", "mp3",
-        "-ar", "16000",
-        "-ac", "1",
+        "-acodec",
+        "mp3",
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
         str(audio_path)
     ]
 
@@ -60,135 +167,110 @@ def extraire_audio(video_path, audio_path):
     )
 
 
-def obtenir_duree(video_path):
-    commande = [
-        "ffprobe",
-        "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        str(video_path)
-    ]
-
-    resultat = subprocess.run(
-        commande,
-        capture_output=True,
-        text=True,
-        check=True
-    )
-
-    return float(resultat.stdout.strip())
-
-
-def transcrire_audio(audio_path):
-    with open(audio_path, "rb") as fichier_audio:
-        transcription = client.audio.transcriptions.create(
+def transcrire(audio_path):
+    with open(audio_path, "rb") as audio:
+        resultat = client.audio.transcriptions.create(
             model="whisper-1",
-            file=fichier_audio,
+            file=audio,
             response_format="verbose_json",
             timestamp_granularities=["segment"]
         )
 
-    return transcription
+    return resultat
 
 
-def analyser_transcription(transcription, nombre_extraits, duree_max):
-    segments = []
+def analyser_segments(segments, nombre, duree_min, duree_max):
+    donnees = []
 
-    for segment in transcription.segments:
-        segments.append({
-            "start": float(segment.start),
-            "end": float(segment.end),
-            "text": segment.text.strip()
+    for segment in segments:
+        donnees.append({
+            "debut": round(segment.start, 2),
+            "fin": round(segment.end, 2),
+            "texte": segment.text
         })
 
     prompt = f"""
 Tu es un expert des vidéos TikTok.
 
-À partir de cette transcription, sélectionne les {nombre_extraits}
-meilleurs passages pour créer des extraits TikTok.
+Sélectionne les {nombre} meilleurs extraits dans cette transcription.
 
-Un bon extrait doit avoir au moins un de ces critères :
-- phrase surprenante ;
+Critères :
+- passage intéressant dès les premières secondes ;
 - conseil utile ;
+- phrase surprenante ;
+- histoire personnelle ;
 - moment drôle ;
 - opinion forte ;
-- émotion ;
-- histoire intéressante ;
-- phrase qui donne envie de regarder jusqu'à la fin.
+- révélation ;
+- extrait compréhensible seul.
 
-Chaque extrait doit durer entre 15 et {duree_max} secondes.
+Contraintes :
+- durée entre {duree_min} et {duree_max} secondes ;
+- pas de chevauchement ;
+- évite les introductions inutiles ;
+- commence autant que possible au début d'une phrase.
 
-Réponds uniquement avec un JSON valide sous cette forme :
+Réponds uniquement avec un JSON valide :
 
 [
   {{
-    "start": 12.5,
-    "end": 48.0,
-    "title": "Titre court de l'extrait",
-    "reason": "Pourquoi cet extrait est intéressant"
+    "debut": 10.5,
+    "fin": 42.8,
+    "titre": "Titre court",
+    "raison": "Pourquoi cet extrait est intéressant",
+    "score": 9
   }}
 ]
 
-TRANSCRIPTION :
-{json.dumps(segments, ensure_ascii=False)}
+Transcription :
+{json.dumps(donnees, ensure_ascii=False)}
 """
 
-    reponse = client.chat.completions.create(
-        model="gpt-4o-mini",
-        temperature=0.3,
-        response_format={"type": "json_object"},
-        messages=[
-            {
-                "role": "system",
-                "content": "Tu sélectionnes les meilleurs moments de vidéos pour TikTok."
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ]
+    resultat = client.responses.create(
+        model="gpt-4.1-mini",
+        input=prompt
     )
 
-    contenu = reponse.choices[0].message.content
-    donnees = json.loads(contenu)
+    texte = resultat.output_text.strip()
+    texte = texte.replace("```json", "")
+    texte = texte.replace("```", "")
+    texte = texte.strip()
 
-    if isinstance(donnees, dict):
-        for cle in ["clips", "extraits", "results", "resultats"]:
-            if cle in donnees:
-                donnees = donnees[cle]
-                break
-
-    return donnees
+    return json.loads(texte)
 
 
-def nettoyer_nom(nom):
-    nom = re.sub(r"[^a-zA-Z0-9À-ÿ _-]", "", nom)
-    nom = nom.strip().replace(" ", "_")
-    return nom[:80] or "extrait"
-
-
-def creer_extrait(video_path, output_path, debut, fin):
+def creer_clip(video_path, sortie, debut, fin):
     duree = max(1, fin - debut)
+
+    filtre = (
+        "scale=1080:1920:force_original_aspect_ratio=increase,"
+        "crop=1080:1920"
+    )
 
     commande = [
         "ffmpeg",
         "-y",
-        "-ss", str(debut),
-        "-i", str(video_path),
-        "-t", str(duree),
-
-        # Format vertical 9:16 pour TikTok
+        "-ss",
+        str(debut),
+        "-i",
+        str(video_path),
+        "-t",
+        str(duree),
         "-vf",
-        "scale=1080:1920:force_original_aspect_ratio=increase,"
-        "crop=1080:1920",
-
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-crf", "23",
-        "-c:a", "aac",
-        "-b:a", "128k",
-        "-movflags", "+faststart",
-        str(output_path)
+        filtre,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "21",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
+        str(sortie)
     ]
 
     subprocess.run(
@@ -199,126 +281,170 @@ def creer_extrait(video_path, output_path, debut, fin):
     )
 
 
-# =========================
+def temps(secondes):
+    minutes = int(secondes // 60)
+    secondes = int(secondes % 60)
+    return f"{minutes:02d}:{secondes:02d}"
+
+
+# ==================================================
 # Interface
-# =========================
+# ==================================================
 
 st.title("🎬 ClipTok")
-st.write("Transforme automatiquement une vidéo en extraits TikTok.")
 
-video_importee = st.file_uploader(
-    "Choisis une vidéo",
-    type=["mp4", "mov", "mkv", "webm", "m4v"]
+st.markdown(
+    '<div class="app-subtitle">'
+    "Transforme automatiquement tes longues vidéos en extraits TikTok"
+    "</div>",
+    unsafe_allow_html=True
 )
 
-with st.expander("⚙️ Paramètres"):
+with st.expander("⚙️ Paramètres", expanded=False):
     nombre_extraits = st.slider(
         "Nombre d'extraits",
         min_value=1,
-        max_value=10,
+        max_value=8,
         value=3
     )
 
-    duree_max = st.slider(
-        "Durée maximale d'un extrait",
-        min_value=20,
+    duree_min = st.slider(
+        "Durée minimale",
+        min_value=10,
         max_value=60,
-        value=45
+        value=20
     )
 
-if video_importee:
-    st.video(video_importee)
+    duree_max = st.slider(
+        "Durée maximale",
+        min_value=20,
+        max_value=90,
+        value=50
+    )
 
-    if st.button("🚀 Créer mes extraits", use_container_width=True):
-        try:
-            nom_video = nettoyer_nom(Path(video_importee.name).stem)
+st.subheader("1. Choisis une vidéo")
 
-            video_path = UPLOAD_DIR / f"{nom_video}.mp4"
-            audio_path = UPLOAD_DIR / f"{nom_video}.mp3"
+video = st.file_uploader(
+    "📱 Appuie ici pour choisir une vidéo",
+    type=["mp4", "mov", "m4v", "webm", "avi"],
+    help="Tu peux sélectionner une vidéo depuis ta galerie ou ta caméra."
+)
 
-            with open(video_path, "wb") as fichier:
-                fichier.write(video_importee.getbuffer())
+if not video:
+    st.info(
+        "Conseil : utilise une vidéo horizontale ou verticale avec de la parole "
+        "pour obtenir les meilleurs résultats."
+    )
+    st.stop()
 
-            barre = st.progress(0)
-            statut = st.empty()
+extension = Path(video.name).suffix.lower()
+video_path = UPLOAD_DIR / f"video_source{extension}"
+audio_path = BASE_DIR / "audio.mp3"
 
-            statut.info("Extraction de l'audio...")
-            extraire_audio(video_path, audio_path)
-            barre.progress(25)
+with open(video_path, "wb") as fichier:
+    fichier.write(video.getbuffer())
 
-            statut.info("Transcription de la vidéo...")
-            transcription = transcrire_audio(audio_path)
-            barre.progress(50)
+st.subheader("2. Aperçu")
 
-            statut.info("Recherche des meilleurs passages...")
-            extraits = analyser_transcription(
-                transcription,
-                nombre_extraits,
-                duree_max
+st.video(str(video_path))
+
+st.subheader("3. Création automatique")
+
+if st.button(
+    "🚀 Créer mes extraits",
+    type="primary",
+    use_container_width=True
+):
+    if duree_min >= duree_max:
+        st.error(
+            "La durée minimale doit être inférieure à la durée maximale."
+        )
+        st.stop()
+
+    try:
+        progress = st.progress(0)
+        message = st.empty()
+
+        message.write("🎵 Préparation de l'audio...")
+        extraire_audio(video_path, audio_path)
+        progress.progress(25)
+
+        message.write("📝 Transcription de la vidéo...")
+        transcription = transcrire(audio_path)
+
+        if not transcription.segments:
+            st.error("Aucune parole n'a été détectée dans la vidéo.")
+            st.stop()
+
+        progress.progress(50)
+
+        message.write("🧠 Recherche des meilleurs passages...")
+        clips = analyser_segments(
+            transcription.segments,
+            nombre_extraits,
+            duree_min,
+            duree_max
+        )
+
+        progress.progress(70)
+
+        st.subheader("✅ Tes extraits")
+
+        for index, clip in enumerate(clips, start=1):
+            debut = float(clip["debut"])
+            fin = float(clip["fin"])
+            titre = clip.get("titre", f"Extrait {index}")
+            raison = clip.get("raison", "")
+            score = clip.get("score", "?")
+
+            nom = f"clip_{index}_{nettoyer_nom(titre)}.mp4"
+            sortie = OUTPUT_DIR / nom
+
+            message.write(f"🎬 Création de l'extrait {index}...")
+            creer_clip(video_path, sortie, debut, fin)
+
+            st.markdown(
+                f"""
+                <div class="clip-card">
+                    <span class="badge">EXTRAIT {index}</span>
+                    <h3>{titre}</h3>
+                    <p>
+                        ⏱️ {temps(fin - debut)}
+                        &nbsp; • &nbsp;
+                        ⭐ Score : {score}/10
+                    </p>
+                    <p>{raison}</p>
+                </div>
+                """,
+                unsafe_allow_html=True
             )
-            barre.progress(65)
 
-            if not extraits:
-                st.error("Aucun extrait intéressant n'a été trouvé.")
-                st.stop()
+            st.video(str(sortie))
 
-            st.subheader("✅ Extraits créés")
-
-            for index, extrait in enumerate(extraits, start=1):
-                debut = max(0, float(extrait["start"]))
-                fin = float(extrait["end"])
-
-                if fin <= debut:
-                    continue
-
-                titre = extrait.get("title", f"Extrait {index}")
-                raison = extrait.get("reason", "")
-
-                nom_sortie = (
-                    f"{index:02d}_{nettoyer_nom(titre)}.mp4"
+            with open(sortie, "rb") as fichier:
+                st.download_button(
+                    "⬇️ Télécharger cet extrait",
+                    data=fichier,
+                    file_name=nom,
+                    mime="video/mp4",
+                    use_container_width=True,
+                    key=f"download_{index}"
                 )
 
-                output_path = OUTPUT_DIR / nom_sortie
+        progress.progress(100)
+        message.success("Tous les extraits sont prêts ! 🎉")
 
-                statut.info(
-                    f"Création de l'extrait {index}/{len(extraits)}..."
-                )
+    except json.JSONDecodeError:
+        st.error(
+            "L'analyse a échoué. Relance le traitement ou réduis la durée "
+            "de la vidéo."
+        )
 
-                creer_extrait(
-                    video_path,
-                    output_path,
-                    debut,
-                    fin
-                )
+    except subprocess.CalledProcessError:
+        st.error(
+            "FFmpeg n'est pas disponible sur le serveur."
+        )
 
-                st.markdown(f"### {index}. {titre}")
-                st.caption(
-                    f"{int(debut)}s → {int(fin)}s"
-                )
-
-                if raison:
-                    st.write(raison)
-
-                st.video(str(output_path))
-
-                with open(output_path, "rb") as fichier:
-                    st.download_button(
-                        label=f"⬇️ Télécharger l'extrait {index}",
-                        data=fichier.read(),
-                        file_name=nom_sortie,
-                        mime="video/mp4",
-                        use_container_width=True,
-                        key=f"download_{index}"
-                    )
-
-            barre.progress(100)
-            statut.success("Tous les extraits sont prêts !")
-
-        except subprocess.CalledProcessError:
-            st.error(
-                "Erreur FFmpeg. Vérifie que FFmpeg est bien installé sur le serveur."
-            )
-
-        except Exception as erreur:
-            st.error("Une erreur est survenue.")
-            st.exception(erreur)
+    except Exception as erreur:
+        st.error("Une erreur est survenue.")
+        st.exception(erreur)
