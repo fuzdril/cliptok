@@ -4,55 +4,61 @@ import subprocess
 from pathlib import Path
 
 import streamlit as st
+from faster_whisper import WhisperModel
 
 
-# =========================
-# Configuration
-# =========================
+# =====================================================
+# CONFIGURATION
+# =====================================================
 
-DOSSIER_TRAVAIL = Path("workspace")
-DOSSIER_VOD = DOSSIER_TRAVAIL / "vod"
-DOSSIER_EXTRAITS = DOSSIER_TRAVAIL / "extraits"
+BASE_DIR = Path("workspace")
+VOD_DIR = BASE_DIR / "vod"
+AUDIO_DIR = BASE_DIR / "audio"
+CLIPS_DIR = BASE_DIR / "clips"
 
-DOSSIER_VOD.mkdir(parents=True, exist_ok=True)
-DOSSIER_EXTRAITS.mkdir(parents=True, exist_ok=True)
+for dossier in [VOD_DIR, AUDIO_DIR, CLIPS_DIR]:
+    dossier.mkdir(parents=True, exist_ok=True)
 
 
-# =========================
-# Fonctions utilitaires
-# =========================
+# =====================================================
+# OUTILS
+# =====================================================
+
+def vider_dossier(dossier: Path):
+    for fichier in dossier.iterdir():
+        if fichier.is_file():
+            fichier.unlink()
+        elif fichier.is_dir():
+            shutil.rmtree(fichier)
+
 
 def verifier_url_twitch(url: str) -> bool:
-    """
-    Vérifie que l'URL correspond à une VOD Twitch.
-    Exemple accepté :
-    https://www.twitch.tv/videos/123456789
-    """
     motif = r"^https?://(www\.)?twitch\.tv/videos/\d+/?$"
     return bool(re.match(motif, url.strip()))
 
 
-def nettoyer_dossier(dossier: Path):
-    """
-    Supprime les anciens fichiers téléchargés.
-    """
-    if dossier.exists():
-        for element in dossier.iterdir():
-            if element.is_file() or element.is_symlink():
-                element.unlink()
-            elif element.is_dir():
-                shutil.rmtree(element)
+def lancer_commande(commande):
+    resultat = subprocess.run(
+        commande,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
 
-    dossier.mkdir(parents=True, exist_ok=True)
+    if resultat.returncode != 0:
+        raise RuntimeError(resultat.stderr[-4000:])
 
+    return resultat
+
+
+# =====================================================
+# TÉLÉCHARGEMENT DE LA VOD
+# =====================================================
 
 def telecharger_vod(url: str) -> Path:
-    """
-    Télécharge une VOD Twitch avec yt-dlp.
-    """
-    nettoyer_dossier(DOSSIER_VOD)
+    vider_dossier(VOD_DIR)
 
-    fichier_sortie = DOSSIER_VOD / "vod.%(ext)s"
+    sortie = VOD_DIR / "vod.%(ext)s"
 
     commande = [
         "yt-dlp",
@@ -62,49 +68,273 @@ def telecharger_vod(url: str) -> Path:
         "--fragment-retries", "10",
         "-f", "bestvideo+bestaudio/best",
         "--merge-output-format", "mp4",
-        "-o", str(fichier_sortie),
-        url.strip(),
+        "-o", str(sortie),
+        url.strip()
     ]
 
-    resultat = subprocess.run(
-        commande,
-        capture_output=True,
-        text=True
-    )
+    lancer_commande(commande)
 
-    if resultat.returncode != 0:
-        raise RuntimeError(
-            resultat.stderr[-3000:]
-            if resultat.stderr
-            else "Le téléchargement a échoué."
-        )
-
-    fichiers_video = list(DOSSIER_VOD.glob("vod.*"))
-
-    fichiers_video = [
-        fichier for fichier in fichiers_video
+    fichiers = [
+        fichier for fichier in VOD_DIR.iterdir()
         if fichier.suffix.lower() in [".mp4", ".mkv", ".webm", ".mov"]
     ]
 
-    if not fichiers_video:
-        raise FileNotFoundError(
-            "La vidéo n'a pas été trouvée après le téléchargement."
+    if not fichiers:
+        raise FileNotFoundError("La VOD n'a pas été téléchargée.")
+
+    return fichiers[0]
+
+
+# =====================================================
+# EXTRACTION AUDIO
+# =====================================================
+
+def extraire_audio(video_path: Path) -> Path:
+    audio_path = AUDIO_DIR / "audio.wav"
+
+    commande = [
+        "ffmpeg",
+        "-y",
+        "-i", str(video_path),
+        "-vn",
+        "-ac", "1",
+        "-ar", "16000",
+        "-c:a", "pcm_s16le",
+        str(audio_path)
+    ]
+
+    lancer_commande(commande)
+
+    if not audio_path.exists():
+        raise FileNotFoundError("Impossible d'extraire l'audio.")
+
+    return audio_path
+
+
+# =====================================================
+# TRANSCRIPTION
+# =====================================================
+
+@st.cache_resource
+def charger_modele():
+    """
+    Le modèle small est plus précis mais demande plus de ressources.
+    Pour un serveur peu puissant, utilise "base" ou "tiny".
+    """
+    return WhisperModel(
+        "small",
+        device="cpu",
+        compute_type="int8"
+    )
+
+
+def transcrire_audio(audio_path: Path):
+    modele = charger_modele()
+
+    segments, informations = modele.transcribe(
+        str(audio_path),
+        language="fr",
+        vad_filter=True,
+        beam_size=5
+    )
+
+    transcription = []
+
+    for segment in segments:
+        texte = segment.text.strip()
+
+        if texte:
+            transcription.append({
+                "debut": float(segment.start),
+                "fin": float(segment.end),
+                "texte": texte
+            })
+
+    return transcription
+
+
+# =====================================================
+# DÉTECTION DES MOMENTS INTÉRESSANTS
+# =====================================================
+
+MOTS_IMPORTANTS = {
+    "incroyable": 5,
+    "impossible": 5,
+    "clutch": 6,
+    "gagné": 4,
+    "gagner": 4,
+    "victoire": 4,
+    "attention": 3,
+    "regardez": 3,
+    "oh": 2,
+    "wow": 4,
+    "wtf": 5,
+    "mdr": 3,
+    "mort": 3,
+    "tuer": 3,
+    "tuez": 3,
+    "rage": 4,
+    "putain": 2,
+    "merde": 2,
+    "non": 1,
+    "oui": 1,
+    "premier": 2,
+    "record": 5,
+    "nouveau": 2,
+    "hack": 4,
+    "bug": 3,
+    "secret": 3,
+    "important": 2,
+}
+
+
+def calculer_score(texte: str) -> int:
+    texte_minuscule = texte.lower()
+    score = 0
+
+    for mot, valeur in MOTS_IMPORTANTS.items():
+        score += texte_minuscule.count(mot) * valeur
+
+    # Les phrases avec beaucoup de ponctuation sont souvent plus expressives
+    score += texte.count("!") * 2
+    score += texte.count("?")
+
+    # Une phrase longue contient souvent davantage de contexte
+    if len(texte.split()) >= 12:
+        score += 1
+
+    return score
+
+
+def detecter_meilleurs_moments(
+    transcription,
+    duree_clip=45,
+    nombre_clips=5
+):
+    candidats = []
+
+    for index, segment in enumerate(transcription):
+        score = calculer_score(segment["texte"])
+
+        if score <= 0:
+            continue
+
+        debut = max(0, segment["debut"] - 12)
+        fin = segment["fin"] + 20
+
+        # On garantit une durée minimum
+        if fin - debut < duree_clip:
+            fin = debut + duree_clip
+
+        texte_autour = []
+
+        for autre in transcription:
+            if autre["fin"] >= debut and autre["debut"] <= fin:
+                texte_autour.append(autre["texte"])
+
+        candidats.append({
+            "debut": debut,
+            "fin": fin,
+            "score": score,
+            "titre": " ".join(texte_autour)[:100]
+        })
+
+    candidats.sort(key=lambda element: element["score"], reverse=True)
+
+    moments = []
+
+    for candidat in candidats:
+        chevauchement = False
+
+        for moment in moments:
+            debut_max = max(candidat["debut"], moment["debut"])
+            fin_min = min(candidat["fin"], moment["fin"])
+
+            if fin_min > debut_max:
+                chevauchement = True
+                break
+
+        if not chevauchement:
+            moments.append(candidat)
+
+        if len(moments) >= nombre_clips:
+            break
+
+    return moments
+
+
+# =====================================================
+# SOUS-TITRES SRT
+# =====================================================
+
+def convertir_temps_srt(secondes: float) -> str:
+    heures = int(secondes // 3600)
+    minutes = int((secondes % 3600) // 60)
+    secondes_entieres = int(secondes % 60)
+    millisecondes = int((secondes - int(secondes)) * 1000)
+
+    return (
+        f"{heures:02d}:{minutes:02d}:"
+        f"{secondes_entieres:02d},{millisecondes:03d}"
+    )
+
+
+def creer_srt(transcription, debut, fin, chemin_srt):
+    lignes = []
+    numero = 1
+
+    for segment in transcription:
+        if segment["fin"] < debut or segment["debut"] > fin:
+            continue
+
+        debut_local = max(0, segment["debut"] - debut)
+        fin_local = min(fin - debut, segment["fin"] - debut)
+
+        lignes.append(str(numero))
+        lignes.append(
+            f"{convertir_temps_srt(debut_local)} --> "
+            f"{convertir_temps_srt(fin_local)}"
         )
+        lignes.append(segment["texte"])
+        lignes.append("")
 
-    return fichiers_video[0]
+        numero += 1
+
+    chemin_srt.write_text("\n".join(lignes), encoding="utf-8")
 
 
-def creer_extrait_test(video_path: Path, debut: int, duree: int) -> Path:
-    """
-    Crée un extrait simple avec FFmpeg.
+# =====================================================
+# CRÉATION D'UN EXTRAIT TIKTOK
+# =====================================================
 
-    Cette fonction sert d'exemple.
-    Elle pourra ensuite être remplacée par ton système
-    d'analyse automatique des moments importants.
-    """
-    nettoyer_dossier(DOSSIER_EXTRAITS)
+def creer_clip_vertical(
+    video_path: Path,
+    transcription,
+    moment,
+    numero: int
+) -> Path:
 
-    extrait_path = DOSSIER_EXTRAITS / "extrait_test.mp4"
+    debut = moment["debut"]
+    fin = moment["fin"]
+    duree = fin - debut
+
+    chemin_clip = CLIPS_DIR / f"clip_{numero}.mp4"
+    chemin_srt = CLIPS_DIR / f"clip_{numero}.srt"
+
+    creer_srt(
+        transcription,
+        debut,
+        fin,
+        chemin_srt
+    )
+
+    # Format vertical 1080x1920.
+    # Les sous-titres sont incrustés dans la vidéo.
+    filtre = (
+        "scale=1080:1920:force_original_aspect_ratio=increase,"
+        "crop=1080:1920,"
+        "subtitles=" + str(chemin_srt).replace("\\", "/")
+    )
 
     commande = [
         "ffmpeg",
@@ -112,136 +342,167 @@ def creer_extrait_test(video_path: Path, debut: int, duree: int) -> Path:
         "-ss", str(debut),
         "-i", str(video_path),
         "-t", str(duree),
+        "-vf", filtre,
         "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "23",
         "-c:a", "aac",
+        "-b:a", "128k",
+        "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",
-        str(extrait_path),
+        str(chemin_clip)
     ]
 
-    resultat = subprocess.run(
-        commande,
-        capture_output=True,
-        text=True
-    )
+    lancer_commande(commande)
 
-    if resultat.returncode != 0:
-        raise RuntimeError(
-            resultat.stderr[-3000:]
-            if resultat.stderr
-            else "La création de l'extrait a échoué."
+    if not chemin_clip.exists():
+        raise FileNotFoundError(
+            f"Le clip {numero} n'a pas été créé."
         )
 
-    return extrait_path
+    return chemin_clip
 
 
-# =========================
-# Interface Streamlit
-# =========================
+# =====================================================
+# INTERFACE STREAMLIT
+# =====================================================
 
 st.set_page_config(
-    page_title="Analyseur de VOD Twitch",
+    page_title="Twitch vers TikTok",
     page_icon="🎬",
     layout="centered"
 )
 
-st.title("🎬 Analyseur de VOD Twitch")
+st.title("🎬 Twitch VOD → extraits TikTok")
 
 st.write(
-    "Colle le lien d'une VOD Twitch publique. "
-    "La vidéo sera téléchargée directement sur le serveur."
+    "Colle une URL de VOD Twitch. "
+    "L'application détectera automatiquement les passages "
+    "les plus intéressants et créera des clips verticaux."
 )
 
 url_vod = st.text_input(
-    "Lien de la VOD Twitch",
+    "URL de la VOD Twitch",
     placeholder="https://www.twitch.tv/videos/123456789"
 )
 
-if st.button("⬇️ Télécharger la VOD", use_container_width=True):
+nombre_clips = st.slider(
+    "Nombre d'extraits à créer",
+    min_value=1,
+    max_value=10,
+    value=5
+)
+
+duree_clip = st.slider(
+    "Durée approximative des extraits",
+    min_value=15,
+    max_value=90,
+    value=45
+)
+
+if st.button(
+    "🚀 Analyser la VOD",
+    use_container_width=True
+):
 
     if not url_vod:
-        st.warning("Colle d'abord un lien Twitch.")
+        st.warning("Colle d'abord une URL Twitch.")
         st.stop()
 
     if not verifier_url_twitch(url_vod):
         st.error(
-            "Lien invalide. Utilise un lien de ce type : "
+            "URL invalide. Exemple : "
             "https://www.twitch.tv/videos/123456789"
         )
         st.stop()
 
     try:
-        with st.spinner(
-            "Téléchargement de la VOD en cours... "
-            "Cela peut prendre du temps pour une vidéo lourde."
-        ):
+        vider_dossier(AUDIO_DIR)
+        vider_dossier(CLIPS_DIR)
+
+        with st.status(
+            "Traitement de la VOD en cours...",
+            expanded=True
+        ) as statut:
+
+            st.write("⬇️ Téléchargement de la VOD...")
             video_path = telecharger_vod(url_vod)
 
-        st.session_state["video_path"] = str(video_path)
+            st.write("🎧 Extraction de l'audio...")
+            audio_path = extraire_audio(video_path)
 
-        st.success("✅ VOD téléchargée avec succès !")
+            st.write("📝 Transcription avec Whisper...")
+            transcription = transcrire_audio(audio_path)
 
-    except FileNotFoundError:
-        st.error(
-            "yt-dlp ou FFmpeg n'est pas installé sur le serveur."
-        )
+            if not transcription:
+                raise RuntimeError(
+                    "Aucune parole n'a été détectée dans la VOD."
+                )
+
+            st.write("🔎 Recherche des meilleurs moments...")
+            moments = detecter_meilleurs_moments(
+                transcription,
+                duree_clip=duree_clip,
+                nombre_clips=nombre_clips
+            )
+
+            if not moments:
+                raise RuntimeError(
+                    "Aucun moment intéressant n'a été détecté."
+                )
+
+            st.write("✂️ Création des clips verticaux...")
+
+            clips = []
+
+            for numero, moment in enumerate(moments, start=1):
+                clip = creer_clip_vertical(
+                    video_path,
+                    transcription,
+                    moment,
+                    numero
+                )
+
+                clips.append({
+                    "fichier": clip,
+                    "moment": moment
+                })
+
+            statut.update(
+                label="✅ Analyse terminée !",
+                state="complete"
+            )
+
+        st.success(f"{len(clips)} extrait(s) créé(s).")
+
+        for element in clips:
+            clip = element["fichier"]
+            moment = element["moment"]
+
+            st.divider()
+
+            st.subheader(
+                f"Clip — score {moment['score']}"
+            )
+
+            st.write(
+                f"De {int(moment['debut'])} à "
+                f"{int(moment['fin'])} secondes"
+            )
+
+            st.caption(moment["titre"])
+
+            st.video(str(clip))
+
+            with open(clip, "rb") as fichier:
+                st.download_button(
+                    label=f"⬇️ Télécharger {clip.name}",
+                    data=fichier,
+                    file_name=clip.name,
+                    mime="video/mp4",
+                    key=clip.name,
+                    use_container_width=True
+                )
 
     except Exception as erreur:
-        st.error(f"Erreur pendant le téléchargement : {erreur}")
-
-
-# =========================
-# Affichage de la vidéo
-# =========================
-
-if "video_path" in st.session_state:
-
-    video_path = Path(st.session_state["video_path"])
-
-    if video_path.exists():
-
-        st.subheader("📺 VOD téléchargée")
-
-        st.video(str(video_path))
-
-        st.divider()
-
-        st.subheader("✂️ Créer un extrait de test")
-
-        debut = st.number_input(
-            "Début de l'extrait, en secondes",
-            min_value=0,
-            value=0,
-            step=1
-        )
-
-        duree = st.number_input(
-            "Durée de l'extrait, en secondes",
-            min_value=1,
-            value=30,
-            step=1
-        )
-
-        if st.button("✂️ Créer l'extrait", use_container_width=True):
-
-            try:
-                with st.spinner("Création de l'extrait..."):
-                    extrait_path = creer_extrait_test(
-                        video_path,
-                        int(debut),
-                        int(duree)
-                    )
-
-                st.success("✅ Extrait créé !")
-                st.video(str(extrait_path))
-
-                with open(extrait_path, "rb") as fichier:
-                    st.download_button(
-                        label="⬇️ Télécharger l'extrait",
-                        data=fichier,
-                        file_name="extrait_twitch.mp4",
-                        mime="video/mp4",
-                        use_container_width=True
-                    )
-
-            except Exception as erreur:
-                st.error(f"Erreur pendant la création : {erreur}")
+        st.error(f"Erreur : {erreur}")
